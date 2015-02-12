@@ -2,6 +2,7 @@ import numpy
 from collections import namedtuple
 from data import DataHandler
 
+
 class QueryFeature:
     def __init__(self, db, query, *args):
         self._db = db
@@ -28,11 +29,12 @@ class QueryFeature:
 
 
 class QueryMedian:
-    def __init__(self, db, metric, team_id, season):
+    def __init__(self, db, metric, team_id, season, day=None):
         self._db = db
         self.metric = metric
         self.id = team_id
         self.season = season
+        self.day = day
         self._for = None
         self._against = None
 
@@ -46,13 +48,15 @@ class QueryMedian:
         WHERE
             season = ?
         AND
-            (wteam = ? OR lteam = ?)""".format(self.metric)
+            (wteam = ? OR lteam = ?)
+        AND
+            daynum < COALESCE(?, 1000)""".format(self.metric)
 
     def _execute(self):
         _for = []
         _against = []
         with self._db.connector(commit=False) as cur:
-            cur.execute(self.query(), (self.id, self.id, self.season, self.id, self.id))
+            cur.execute(self.query(), (self.id, self.id, self.season, self.id, self.id, self.day))
             for row in cur:
                 _for.append(row["for"])
                 _against.append(row["against"])
@@ -75,9 +79,10 @@ class QueryMedian:
 class Team:
     pseudo_feature = namedtuple("pseudo_feature", ["for_", "against"])
 
-    def __init__(self, team_id, season):
+    def __init__(self, team_id, season, day=None):
         self.id = team_id
         self.season = season
+        self.day = day
         self._db = DataHandler()
         self.name = QueryFeature(self._db, "SELECT team_name FROM teams WHERE team_id=?", self.id)
         # features
@@ -89,7 +94,9 @@ class Team:
         WHERE
             season = ?
         AND
-            wteam = ?""", self.season, self.id)
+            wteam = ?
+        AND
+            daynum < COALESCE(?, 1000)""", self.season, self.id, self.day)
         self.losses = QueryFeature(self._db, """
         SELECT
             COUNT(*)
@@ -98,7 +105,9 @@ class Team:
         WHERE
             season = ?
         AND
-            lteam = ?""", self.season, self.id)
+            lteam = ?
+        AND
+            daynum < COALESCE(?, 1000)""", self.season, self.id, self.day)
 
         self.field_goals_made = QueryMedian(self._db, 'fgm', self.id, self.season)
         self.field_goals_attempted = QueryMedian(self._db, 'fga', self.id, self.season)
@@ -171,29 +180,29 @@ class Team:
                "Average steals for: {:.1f}\tAgainst: {:.1f}\n" \
                "Average blocks for: {:.1f}\tAgainst: {:.1f}\n" \
                "Average personal fouls for: {:.1f}\tAgainst: {:.1f}".format(
-                self.season, self.name,
-                self.wins.val, self.losses.val,
-                self.avg_points_for, self.avg_points_against,
-                self.field_goals_made.for_, self.field_goals_made.against,
-                self.field_goals_attempted.for_, self.field_goals_attempted.against,
-                self.field_goal_pct.for_, self.field_goal_pct.against,
-                self.free_throws_made.for_, self.free_throws_made.against,
-                self.free_throws_attempted.for_, self.free_throws_attempted.against,
-                self.three_pt_field_goals_made.for_, self.three_pt_field_goals_made.against,
-                self.three_pt_field_goals_attempted.for_, self.three_pt_field_goals_attempted.against,
-                self.offensive_rebounds.for_, self.offensive_rebounds.against,
-                self.defensive_rebounds.for_, self.defensive_rebounds.against,
-                self.assists.for_, self.assists.against,
-                self.turnovers.for_, self.turnovers.against,
-                self.steals.for_, self.steals.against,
-                self.blocks.for_, self.blocks.against,
-                self.personal_fouls.for_, self.personal_fouls.against,
+            self.season, self.name,
+            self.wins.val, self.losses.val,
+            self.avg_points_for, self.avg_points_against,
+            self.field_goals_made.for_, self.field_goals_made.against,
+            self.field_goals_attempted.for_, self.field_goals_attempted.against,
+            self.field_goal_pct.for_, self.field_goal_pct.against,
+            self.free_throws_made.for_, self.free_throws_made.against,
+            self.free_throws_attempted.for_, self.free_throws_attempted.against,
+            self.three_pt_field_goals_made.for_, self.three_pt_field_goals_made.against,
+            self.three_pt_field_goals_attempted.for_, self.three_pt_field_goals_attempted.against,
+            self.offensive_rebounds.for_, self.offensive_rebounds.against,
+            self.defensive_rebounds.for_, self.defensive_rebounds.against,
+            self.assists.for_, self.assists.against,
+            self.turnovers.for_, self.turnovers.against,
+            self.steals.for_, self.steals.against,
+            self.blocks.for_, self.blocks.against,
+            self.personal_fouls.for_, self.personal_fouls.against,
         )
 
 
 if __name__ == '__main__':
     for season in range(2003, 2015):
-        print(str(Team(1314, season)))
+        print(str(Team(1314, season, 20)))
         print("\n")
-    # team = Team(1314, 2003)
-    # print(str(team))
+        # team = Team(1314, 2003)
+        # print(str(team))
