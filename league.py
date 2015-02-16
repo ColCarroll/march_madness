@@ -30,6 +30,10 @@ class League:
                     self._team_idxs[row["lteam"]] = idx
                     self._team_ids[idx] = row["lteam"]
 
+    def strength(self, team_id):
+        return self.pagerank[self.team_idxs[team_id]]
+
+
     @property
     def team_ids(self):
         if self._team_ids is None:

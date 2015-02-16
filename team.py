@@ -2,11 +2,30 @@ import numpy
 from collections import namedtuple
 from data import DataHandler
 
+POLLS = [  # these appear to be the most consistent
+           "MOR",
+           "POM",
+           "SAG",
+]
+
+
+class BaseFeature:
+    def __init__(self, label, val):
+        self.label = label
+        self.val = val
+
+    def __repr__(self):
+        return str(self.label)
+
+    def __str__(self):
+        return "{:s}:\t{:s}".format(*map(str, [self.label, self.val]))
+
 
 class QueryFeature:
-    def __init__(self, db, query, *args):
+    def __init__(self, label, db, query, *args):
         self._db = db
         self._val = None
+        self.label = label
         self.query = query
         self.args = args
 
@@ -22,15 +41,16 @@ class QueryFeature:
         return self._val
 
     def __repr__(self):
-        return self.val
+        return str(self.label)
 
     def __str__(self):
-        return str(self.val)
+        return "{:s}:\t{:s}".format(str(self.label), str(self.val))
 
 
 class QueryMedian:
-    def __init__(self, db, metric, team_id, season, day=None):
+    def __init__(self, label, db, metric, team_id, season, day=None):
         self._db = db
+        self.label = label
         self.metric = metric
         self.id = team_id
         self.season = season
@@ -75,6 +95,13 @@ class QueryMedian:
             self._execute()
         return self._against
 
+    def __repr__(self):
+        return str(self.label)
+
+    def __str__(self):
+        return "{:s} for:\t{:s}\n{:s} against:\t{:s}".format(
+            *map(str, [self.label, self.for_, self.label, self.against]))
+
 
 class Team:
     pseudo_feature = namedtuple("pseudo_feature", ["for_", "against"])
@@ -84,125 +111,100 @@ class Team:
         self.season = season
         self.day = day
         self._db = DataHandler()
-        self.name = QueryFeature(self._db, "SELECT team_name FROM teams WHERE team_id=?", self.id)
-        # features
-        self.wins = QueryFeature(self._db, """
-        SELECT
-            COUNT(*)
-        FROM
-            regular_season_compact_results
-        WHERE
-            season = ?
-        AND
-            wteam = ?
-        AND
-            daynum < COALESCE(?, 1000)""", self.season, self.id, self.day)
-        self.losses = QueryFeature(self._db, """
-        SELECT
-            COUNT(*)
-        FROM
-            regular_season_compact_results
-        WHERE
-            season = ?
-        AND
-            lteam = ?
-        AND
-            daynum < COALESCE(?, 1000)""", self.season, self.id, self.day)
+        self.fgm = QueryMedian("Field goals made", self._db, 'fgm', self.id, self.season)
+        self.fga = QueryMedian("Field goals attempted", self._db, 'fga', self.id, self.season)
+        self.fgm3 = QueryMedian("3 point field goals made", self._db, 'fgm3', self.id, self.season)
+        self.fga3 = QueryMedian("3 point field goals attempted", self._db, 'fga3', self.id, self.season)
+        self.ftm = QueryMedian("Free throws made", self._db, 'ftm', self.id, self.season)
+        self.fta = QueryMedian("Free throws attempted", self._db, 'fta', self.id, self.season)
 
-        self.field_goals_made = QueryMedian(self._db, 'fgm', self.id, self.season)
-        self.field_goals_attempted = QueryMedian(self._db, 'fga', self.id, self.season)
-        self.three_pt_field_goals_made = QueryMedian(self._db, 'fgm3', self.id, self.season)
-        self.three_pt_field_goals_attempted = QueryMedian(self._db, 'fga3', self.id, self.season)
-        self.free_throws_made = QueryMedian(self._db, 'ftm', self.id, self.season)
-        self.free_throws_attempted = QueryMedian(self._db, 'fta', self.id, self.season)
-        self.offensive_rebounds = QueryMedian(self._db, 'or', self.id, self.season)
-        self.defensive_rebounds = QueryMedian(self._db, 'dr', self.id, self.season)
-        self.assists = QueryMedian(self._db, 'ast', self.id, self.season)
-        self.turnovers = QueryMedian(self._db, 'to', self.id, self.season)
-        self.steals = QueryMedian(self._db, 'stl', self.id, self.season)
-        self.blocks = QueryMedian(self._db, 'blk', self.id, self.season)
-        self.personal_fouls = QueryMedian(self._db, 'pf', self.id, self.season)
-        self._points_for = None
-        self._points_against = None
+        self.all_features = [QueryFeature("Name", self._db, "SELECT team_name FROM teams WHERE team_id=?", self.id),
+                             QueryFeature("Wins", self._db, """
+                SELECT
+                    COUNT(*)
+                FROM
+                    regular_season_compact_results
+                WHERE
+                    season = ?
+                AND
+                    wteam = ?
+                AND
+                    daynum < COALESCE(?, 1000)""", self.season, self.id, self.day),
+                             QueryFeature("Losses", self._db, """
+                SELECT
+                    COUNT(*)
+                FROM
+                    regular_season_compact_results
+                WHERE
+                    season = ?
+                AND
+                    lteam = ?
+                AND
+                    daynum < COALESCE(?, 1000)""", self.season, self.id, self.day),
+                             QueryMedian("Score", self._db, 'score', self.id, self.season),
+                             self.fgm,
+                             self.fga,
+                             self.fgm3,
+                             self.fga3,
+                             self.ftm,
+                             self.fta,
+                             QueryMedian("Offensive rebounds", self._db, 'or', self.id, self.season),
+                             QueryMedian("Defensive rebounds", self._db, 'dr', self.id, self.season),
+                             QueryMedian("Assists", self._db, 'ast', self.id, self.season),
+                             QueryMedian("Turnovers", self._db, 'to', self.id, self.season),
+                             QueryMedian("Steals", self._db, 'stl', self.id, self.season),
+                             QueryMedian("Blocks", self._db, 'blk', self.id, self.season),
+                             QueryMedian("Personal fouls", self._db, 'pf', self.id, self.season)] + \
+                            self._ratios() + self._polls()
+
+    def __hash__(self):
+        return hash((self.season, self.id, self.day))
+
+    def _ratios(self):
+        return [
+            BaseFeature("Field goal pct for", self.fgm.for_ / float(self.fga.for_)),
+            BaseFeature("Field goal pct against", self.fgm.against / float(self.fga.against)),
+            BaseFeature("3 pt field goal pct for", self.fgm3.for_ / float(self.fga3.for_)),
+            BaseFeature("3 pt field goal pct against", self.fgm3.against / float(self.fga3.against)),
+            BaseFeature("Free throw pct for", self.ftm.for_ / float(self.fta.for_)),
+            BaseFeature("Free throw pct against", self.ftm.against / float(self.fta.against)),
+        ]
+
+    def _polls(self):
+        polls = []
+        for poll in POLLS:
+            with self._db.connector() as cur:
+                cur.execute("""SELECT rating_day_num, orank
+                               FROM massey_ordinals
+                               WHERE season=? AND team=? AND sys_name=?;""", (self.season, self.id, poll))
+                data = list(cur)
+                first_rank = min(data, key=lambda j: j['rating_day_num'])['orank']
+                last_rank = max(data, key=lambda j: j['rating_day_num'])['orank']
+                rank_ratio = float(first_rank) / float(last_rank)
+                polls.extend([
+                    BaseFeature("{:s} poll start".format(poll), first_rank),
+                    BaseFeature("{:s} poll end".format(poll), last_rank),
+                    BaseFeature("{:s} poll ratio".format(poll), rank_ratio)
+                ])
+        return polls
+
+    def features(self):
+        features = []
+        for ftr in self.all_features[1:]:
+            if isinstance(ftr, QueryMedian):
+                features.append(ftr.for_)
+                features.append(ftr.against)
+            elif isinstance(ftr, QueryFeature) or isinstance(ftr, BaseFeature):
+                features.append(ftr.val)
+        return features
 
     def __repr__(self):
-        return "{:d} {:s}".format(self.season, self.name)
-
-    @property
-    def field_goal_pct(self):
-        return self.pseudo_feature(
-            for_=float(self.field_goals_made.for_) / float(self.field_goals_attempted.for_),
-            against=float(self.field_goals_made.against) / float(self.field_goals_attempted.against))
-
-    def _points(self):
-        self._points_for = []
-        self._points_against = []
-        with self._db.connector(commit=False) as cur:
-            cur.execute("""
-        SELECT
-            CASE wteam WHEN ? THEN wscore ELSE lscore END AS points_for,
-            CASE lteam WHEN ? THEN wscore ELSE lscore END AS points_against
-        FROM
-            regular_season_compact_results
-        WHERE
-            season = ?
-        AND
-            (wteam = ? OR lteam = ?)""", (self.id, self.id, self.season, self.id, self.id))
-            for row in cur:
-                self._points_for.append(row["points_for"])
-                self._points_against.append(row["points_against"])
-
-    @property
-    def avg_points_for(self):
-        if self._points_for is None:
-            self._points()
-        return numpy.median(self._points_for)
-
-    @property
-    def avg_points_against(self):
-        if self._points_against is None:
-            self._points()
-        return numpy.median(self._points_against)
+        return "{:d} {:d}".format(self.season, self.id)
 
     def __str__(self):
-        return "{:d} {:s}\n{:d}-{:d}\nAvg Points For: {:.1f}\tAgainst: {:.1f}\n" \
-               "Average field goals for: {:.1f}\tAgainst: {:.1f}\n" \
-               "Average field goals attempted: {:.1f}\tAttempted against: {:.1f}\n" \
-               "Average field goal pct: {:.2f}\tPct against: {:.2f}\n" \
-               "Average free throws for: {:.1f}\tAgainst: {:.1f}\n" \
-               "Average free throws attempted: {:.1f}\tAttempted against: {:.1f}\n" \
-               "Average three pointers for: {:.1f}\tAgainst: {:.1f}\n" \
-               "Average three pointers attempted: {:.1f}\tAttempted against: {:.1f}\n" \
-               "Average offensive rebounds for: {:.1f}\tAgainst: {:.1f}\n" \
-               "Average defensive rebounds for: {:.1f}\tAgainst: {:.1f}\n" \
-               "Average assists for: {:.1f}\tAgainst: {:.1f}\n" \
-               "Average turnovers for: {:.1f}\tAgainst: {:.1f}\n" \
-               "Average steals for: {:.1f}\tAgainst: {:.1f}\n" \
-               "Average blocks for: {:.1f}\tAgainst: {:.1f}\n" \
-               "Average personal fouls for: {:.1f}\tAgainst: {:.1f}".format(
-            self.season, self.name,
-            self.wins.val, self.losses.val,
-            self.avg_points_for, self.avg_points_against,
-            self.field_goals_made.for_, self.field_goals_made.against,
-            self.field_goals_attempted.for_, self.field_goals_attempted.against,
-            self.field_goal_pct.for_, self.field_goal_pct.against,
-            self.free_throws_made.for_, self.free_throws_made.against,
-            self.free_throws_attempted.for_, self.free_throws_attempted.against,
-            self.three_pt_field_goals_made.for_, self.three_pt_field_goals_made.against,
-            self.three_pt_field_goals_attempted.for_, self.three_pt_field_goals_attempted.against,
-            self.offensive_rebounds.for_, self.offensive_rebounds.against,
-            self.defensive_rebounds.for_, self.defensive_rebounds.against,
-            self.assists.for_, self.assists.against,
-            self.turnovers.for_, self.turnovers.against,
-            self.steals.for_, self.steals.against,
-            self.blocks.for_, self.blocks.against,
-            self.personal_fouls.for_, self.personal_fouls.against,
-        )
+        return "\n".join(str(feature) for feature in self.all_features)
 
 
 if __name__ == '__main__':
-    for season in range(2003, 2015):
-        print(str(Team(1314, season, 20)))
-        print("\n")
-        # team = Team(1314, 2003)
-        # print(str(team))
+    team = Team(1314, 2005)
+    print(str(team))
