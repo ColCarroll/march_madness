@@ -47,41 +47,23 @@ class QueryFeature:
         return "{:s}:\t{:s}".format(str(self.label), str(self.val))
 
 
-class QueryMedian:
-    def __init__(self, label, db, metric, team_id, season, day=None):
-        self._db = db
+class MedianFeature:
+    def __init__(self, label, data, metric, team_id):
+        self.data = data
         self.label = label
-        self.metric = metric
         self.id = team_id
-        self.season = season
-        self.day = day
+        self.win_metric = "w" + metric
+        self.lose_metric = "l" + metric
         self._for = None
         self._against = None
 
-    def query(self):
-        return """
-        SELECT
-            CASE wteam WHEN ? THEN w{0:s} ELSE l{0:s} END AS for,
-            CASE lteam WHEN ? THEN w{0:s} ELSE l{0:s} END AS against
-        FROM
-            regular_season_detailed_results
-        WHERE
-            season = ?
-        AND
-            (wteam = ? OR lteam = ?)
-        AND
-            daynum < COALESCE(?, 1000)""".format(self.metric)
-
     def _execute(self):
-        _for = []
-        _against = []
-        with self._db.connector(commit=False) as cur:
-            cur.execute(self.query(), (self.id, self.id, self.season, self.id, self.id, self.day))
-            for row in cur:
-                _for.append(row["for"])
-                _against.append(row["against"])
-        self._for = numpy.median(_for)
-        self._against = numpy.median(_against)
+        self._for = numpy.median(
+            [j[self.win_metric] if j['wteam'] == self.id else j[self.lose_metric] for j in self.data]
+        )
+        self._against = numpy.median(
+            [j[self.lose_metric] if j['wteam'] == self.id else j[self.win_metric] for j in self.data]
+        )
 
     @property
     def for_(self):
@@ -106,17 +88,17 @@ class QueryMedian:
 class Team:
     pseudo_feature = namedtuple("pseudo_feature", ["for_", "against"])
 
-    def __init__(self, team_id, season, day=None):
+    def __init__(self, team_id, season):
         self.id = team_id
         self.season = season
-        self.day = day
+        self._data = None
         self._db = DataHandler()
-        self.fgm = QueryMedian("Field goals made", self._db, 'fgm', self.id, self.season)
-        self.fga = QueryMedian("Field goals attempted", self._db, 'fga', self.id, self.season)
-        self.fgm3 = QueryMedian("3 point field goals made", self._db, 'fgm3', self.id, self.season)
-        self.fga3 = QueryMedian("3 point field goals attempted", self._db, 'fga3', self.id, self.season)
-        self.ftm = QueryMedian("Free throws made", self._db, 'ftm', self.id, self.season)
-        self.fta = QueryMedian("Free throws attempted", self._db, 'fta', self.id, self.season)
+        self.fgm = MedianFeature("Field goals made", self.data, 'fgm', self.id)
+        self.fga = MedianFeature("Field goals attempted", self.data, 'fga', self.id)
+        self.fgm3 = MedianFeature("3 point field goals made", self.data, 'fgm3', self.id)
+        self.fga3 = MedianFeature("3 point field goals attempted", self.data, 'fga3', self.id)
+        self.ftm = MedianFeature("Free throws made", self.data, 'ftm', self.id)
+        self.fta = MedianFeature("Free throws attempted", self.data, 'fta', self.id)
 
         self.all_features = [QueryFeature("Name", self._db, "SELECT team_name FROM teams WHERE team_id=?", self.id),
                              QueryFeature("Wins", self._db, """
@@ -127,9 +109,7 @@ class Team:
                 WHERE
                     season = ?
                 AND
-                    wteam = ?
-                AND
-                    daynum < COALESCE(?, 1000)""", self.season, self.id, self.day),
+                    wteam = ?""", self.season, self.id),
                              QueryFeature("Losses", self._db, """
                 SELECT
                     COUNT(*)
@@ -138,27 +118,39 @@ class Team:
                 WHERE
                     season = ?
                 AND
-                    lteam = ?
-                AND
-                    daynum < COALESCE(?, 1000)""", self.season, self.id, self.day),
-                             QueryMedian("Score", self._db, 'score', self.id, self.season),
+                    lteam = ?""", self.season, self.id),
+                             MedianFeature("Score", self.data, 'score', self.id),
                              self.fgm,
                              self.fga,
                              self.fgm3,
                              self.fga3,
                              self.ftm,
                              self.fta,
-                             QueryMedian("Offensive rebounds", self._db, 'or', self.id, self.season),
-                             QueryMedian("Defensive rebounds", self._db, 'dr', self.id, self.season),
-                             QueryMedian("Assists", self._db, 'ast', self.id, self.season),
-                             QueryMedian("Turnovers", self._db, 'to', self.id, self.season),
-                             QueryMedian("Steals", self._db, 'stl', self.id, self.season),
-                             QueryMedian("Blocks", self._db, 'blk', self.id, self.season),
-                             QueryMedian("Personal fouls", self._db, 'pf', self.id, self.season)] + \
+                             MedianFeature("Offensive rebounds", self.data, 'or', self.id),
+                             MedianFeature("Defensive rebounds", self.data, 'dr', self.id),
+                             MedianFeature("Assists", self.data, 'ast', self.id),
+                             MedianFeature("Turnovers", self.data, 'to', self.id),
+                             MedianFeature("Steals", self.data, 'stl', self.id),
+                             MedianFeature("Blocks", self.data, 'blk', self.id),
+                             MedianFeature("Personal fouls", self.data, 'pf', self.id)] + \
                             self._ratios() + self._polls()
 
-    def __hash__(self):
-        return hash((self.season, self.id, self.day))
+    @property
+    def data(self):
+        if self._data is None:
+            with self._db.connector() as cur:
+                cur.execute("""
+                    SELECT
+                        *
+                    FROM
+                        regular_season_detailed_results
+                    WHERE
+                        season = ?
+                    AND
+                        (wteam = ? OR lteam = ?)""", (self.season, self.id, self.id)
+                )
+                self._data = [row for row in cur]
+        return self._data
 
     def _ratios(self):
         return [
@@ -178,9 +170,12 @@ class Team:
                                FROM massey_ordinals
                                WHERE season=? AND team=? AND sys_name=?;""", (self.season, self.id, poll))
                 data = list(cur)
-                first_rank = min(data, key=lambda j: j['rating_day_num'])['orank']
-                last_rank = max(data, key=lambda j: j['rating_day_num'])['orank']
-                rank_ratio = float(first_rank) / float(last_rank)
+                if data:
+                    first_rank = min(data, key=lambda j: j['rating_day_num'])['orank']
+                    last_rank = max(data, key=lambda j: j['rating_day_num'])['orank']
+                    rank_ratio = float(first_rank) / float(last_rank)
+                else:
+                    first_rank, last_rank, rank_ratio = 0, 0, 0
                 polls.extend([
                     BaseFeature("{:s} poll start".format(poll), first_rank),
                     BaseFeature("{:s} poll end".format(poll), last_rank),
@@ -191,7 +186,7 @@ class Team:
     def features(self):
         features = []
         for ftr in self.all_features[1:]:
-            if isinstance(ftr, QueryMedian):
+            if isinstance(ftr, MedianFeature):
                 features.append(ftr.for_)
                 features.append(ftr.against)
             elif isinstance(ftr, QueryFeature) or isinstance(ftr, BaseFeature):

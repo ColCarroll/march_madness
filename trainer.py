@@ -4,10 +4,10 @@ import os
 import re
 import numpy
 import scipy
-from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.linear_model import LogisticRegression, SGDClassifier
+from sklearn.decomposition import PCA
+from sklearn.ensemble import BaggingClassifier
 from data import DataHandler
-from team import Team
 from league import League
 
 DIR = os.path.dirname(os.path.realpath(__file__))
@@ -58,28 +58,24 @@ class SeasonFeatures:
 
             features = []
             labels = []
-            teams = {}
+            print(self.season)
             for j, row in enumerate(cur):
                 print(j)
 
                 team_ids = row['wteam'], row['lteam']
                 seeds = list(map(int_seed, [row['wseed'], row['lseed']]))
                 pageranks = list(map(self.league.strength, team_ids))
+                team_deltas = [self.league.team_deltas(team_id) for team_id in team_ids]
 
-                team_objs = []
-                for team_id in team_ids:
-                    key = (self.season, team_id)
-                    if key not in teams:
-                        teams[key] = Team(team_id, self.season)
-                    team_objs.append(teams[key])
+                team_objs = [self.league.data(team_id) for team_id in team_ids]
 
                 # Model should be symmetric, so add features for team A vs team B and team B vs team A
                 team_features = Features(row['season'], team_objs[0], team_objs[1]).features()
-                features.append(team_features + seeds + pageranks)
+                features.append(team_features + seeds + pageranks + team_deltas[0] + team_deltas[1])
                 labels.append(1)
 
                 team_features = Features(row['season'], team_objs[1], team_objs[0]).features()
-                features.append(team_features + seeds[-1::-1] + pageranks[-1::-1])
+                features.append(team_features + seeds[-1::-1] + pageranks[-1::-1] + team_deltas[1] + team_deltas[0])
                 labels.append(0)
 
                 cPickle.dump(features, open(self.feature_pickle, 'w'))
@@ -108,31 +104,55 @@ def features_labels(before_season):
 
 
 def find_best_model(season):
-    train_x, train_y = features_labels(season)
-    test_x, test_y = map(numpy.array, SeasonFeatures(season).features_and_labels())
+    raw_train_x, train_y = features_labels(season)
+    raw_test_x, test_y = map(numpy.array, SeasonFeatures(season).features_and_labels())
     results = {}
-    #
-    # # test random forests
-    # depth = 3
-    # for learning_rate in [10 ** (0.5 * j) for j in range(-8, -1)]:
-    # model = GradientBoostingClassifier(n_estimators=500, learning_rate=learning_rate, max_depth=depth).fit(
-    # train_x, train_y)
-    #     predictions = model.predict_proba(test_x)[:, 1]
-    #     results[("random forest", depth, learning_rate)] = log_loss(test_y, predictions)
-
-    # test logistic regressions
     max_right = (0, 1)
-    for penalty in ("l1", "l2"):
-        for c in [10 ** (0.5 * j) for j in range(-15, 0)]:
-            model = LogisticRegression(penalty=penalty, C=c).fit(train_x, train_y)
-            predictions = model.predict_proba(test_x)[:, 1]
 
-            num_right = (test_y == predictions.round()).sum()
-            pct_right = num_right / float(len(test_y))
-            if pct_right > float(max_right[0]) / max_right[1]:
-                max_right = (num_right, len(test_y))
+    for use_pca in (True, False):
+        if use_pca:
+            pca = PCA(n_components=12)
+            train_x = pca.fit_transform(raw_train_x)
+            test_x = pca.transform(raw_test_x)
+        else:
+            train_x = raw_train_x
+            test_x = raw_test_x
 
-            results[(penalty, c)] = log_loss(test_y, predictions)
+        for loss_func in ("log", "modified_huber"):
+            for penalty in ("l1", "l2"):
+                for alpha in [10 ** (0.5 * j) for j in range(-4, 10)]:
+                    model = SGDClassifier(loss=loss_func, penalty=penalty, alpha=alpha, n_iter=1000).fit(train_x, train_y)
+                    predictions = model.predict_proba(test_x)[:, 1]
+                    loss = log_loss(test_y, predictions)
+                    results[("sgd", use_pca, loss_func, penalty, 2 * numpy.log10(alpha))] = loss
+
+                    num_right = (test_y == predictions.round()).sum()
+                    pct_right = num_right / float(len(test_y))
+                    if pct_right > float(max_right[0]) / max_right[1]:
+                        max_right = (num_right, len(test_y))
+
+        # test logistic regressions
+        for penalty in ("l1", "l2"):
+            for c in [10 ** (0.5 * j) for j in range(-15, 0)]:
+                model = LogisticRegression(penalty=penalty, C=c).fit(train_x, train_y)
+                predictions = model.predict_proba(test_x)[:, 1]
+
+                num_right = (test_y == predictions.round()).sum()
+                pct_right = num_right / float(len(test_y))
+                if pct_right > float(max_right[0]) / max_right[1]:
+                    max_right = (num_right, len(test_y))
+
+                results[(penalty, use_pca, 2 * numpy.log10(c))] = log_loss(test_y, predictions)
+
+                model = BaggingClassifier(LogisticRegression(penalty=penalty, C=c), n_estimators=100, max_samples=0.5).fit(train_x, train_y)
+                predictions = model.predict_proba(test_x)[:, 1]
+
+                num_right = (test_y == predictions.round()).sum()
+                pct_right = num_right / float(len(test_y))
+                if pct_right > float(max_right[0]) / max_right[1]:
+                    max_right = (num_right, len(test_y))
+
+                results[(penalty + " bagging", use_pca, 2 * numpy.log10(c))] = log_loss(test_y, predictions)
     print("{:d} out of {:d}".format(*map(int, max_right)))
     return results
 
@@ -145,7 +165,11 @@ def main():
         year_results = find_best_model(year)
         for model, loss in year_results.items():
             results[model].append(loss)
-        print("Score: {:.5f}\n".format(min(year_results.items(), key=lambda j: j[1])[1]))
+        model, score = min(year_results.items(), key=lambda j: j[1])
+        print("Model: {:s}\n\tScore: {:.5f}\n".format(str(model), score))
+
+    for j, model in enumerate(sorted(results.items(), key=lambda j: numpy.mean(j[1]))):
+        print("{:,d}. {:s}".format(j + 1, print_model(model)))
 
     best_models = [min(results.items(), key=lambda j: numpy.median(j[1])),
                    min(results.items(), key=lambda j: numpy.mean(j[1])),
@@ -155,14 +179,17 @@ def main():
 
     print("\nBest models:")
     for model in best_models:
-        print("\nName: {:s}\nMean score:\t{:.5f}\nMedian score:\t{:.5f}\nMin score:\t{:.5f}\nMax score:\t{:.5f}".format(
-            str(model[0]),
-            numpy.mean(model[1]),
-            numpy.median(model[1]),
-            numpy.min(model[1]),
-            numpy.max(model[1]),
-        )
-        )
+        print(print_model(model))
+
+
+def print_model(model):
+    return "\nName: {:s}\n\tMean score:\t{:.5f}\n\tMedian score:\t{:.5f}\n\tMin score:\t{:.5f}\n\tMax score:\t{:.5f}".format(
+        str(model[0]),
+        numpy.mean(model[1]),
+        numpy.median(model[1]),
+        numpy.min(model[1]),
+        numpy.max(model[1]),
+    )
 
 
 if __name__ == '__main__':
