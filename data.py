@@ -4,6 +4,8 @@ import glob
 from contextlib import contextmanager
 import sqlite3
 from collections import namedtuple
+import datetime
+from pointspreads import get_all_seasons
 
 DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(DIR, 'data')
@@ -61,7 +63,23 @@ class DataHandler:
         with self.connector(commit=True) as cur:
             cur.execute(query)
 
+    def get_pointspreads(self):
+        fname = os.path.join(DATA_DIR, "pointspreads.csv")
+        if self.table_exists('pointspreads'):
+            with self.connector() as cur:
+                cur.execute("SELECT MAX(date) FROM pointspreads;")
+                max_date = datetime.datetime.strptime(cur.fetchone()[0], "%m/%d/%Y").date()
+            if (datetime.date.today() - max_date).days > 4:
+                with self.connector(commit=True) as cur:
+                    cur.execute("DROP TABLE pointspreads;")
+            else:
+                return
+        pointspread_data = get_all_seasons()
+        with open(fname, 'w') as buff:
+            buff.write(pointspread_data)
+
     def build(self):
+        self.get_pointspreads()
         for csv_name in self.list_files():
             self.build_table(csv_name)
 
