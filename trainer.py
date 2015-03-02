@@ -1,14 +1,16 @@
 import cPickle
 from collections import defaultdict
+import glob
 import os
 import re
 import numpy
 import scipy
-from sklearn.linear_model import LogisticRegression, SGDClassifier
+from sklearn.linear_model import LogisticRegression, SGDClassifier, LassoLarsCV
 from sklearn.decomposition import PCA
 from sklearn.ensemble import BaggingClassifier
+from sklearn.preprocessing import Normalizer, PolynomialFeatures
 from data import DataHandler
-from league import League
+from league import League, PointSpreads
 
 DIR = os.path.dirname(os.path.realpath(__file__))
 PICKLE_DIR = os.path.join(DIR, "pickles")
@@ -29,62 +31,73 @@ def int_seed(str_seed):
 class Features:
     def __init__(self, season, team_one, team_two, daynum=None):
         self.season = season
+        self.daynum = daynum
         self.team_one = team_one
         self.team_two = team_two
-        self.daynum = daynum
 
     def features(self):
-        return self.team_one.features() + self.team_two.features()
+        if self.daynum is None:
+            features = []
+            for team in (self.team_one, self.team_two):
+                features += max(v for k, v in team.features.iteritems() if k[0] == self.season)
+            return features
+
+        key = (self.season, self.daynum)
+        try:
+            return self.team_one.features[key] + self.team_two.features[key]
+        except KeyError:
+            return None
 
 
-class SeasonFeatures:
-    def __init__(self, season):
-        self.label_pickle = os.path.join(PICKLE_DIR, '{:d}_labels.pkl'.format(season))
-        self.feature_pickle = os.path.join(PICKLE_DIR, '{:d}_features.pkl'.format(season))
-        self.season = season
+class AllFeatures:
+    def __init__(self):
+        self.label_pickle = os.path.join(PICKLE_DIR, '{:d}_labels.pkl')
+        self.feature_pickle = os.path.join(PICKLE_DIR, '{:d}_features.pkl')
         self._db = DataHandler()
-        self.league = League(season)
+        self.league = League()
+        self.pointspreads = PointSpreads()
 
-    def features_and_labels(self):
-        if os.path.exists(self.feature_pickle) and os.path.exists(self.label_pickle):
-            return cPickle.load(open(self.feature_pickle)), cPickle.load(open(self.label_pickle))
+    def build_features(self):
+        for season in range(2007, 2015):
+            self.features_and_labels(season)
+
+    def features_and_labels(self, season):
+        feature_pickle = self.feature_pickle.format(season)
+        label_pickle = self.label_pickle.format(season)
+        if os.path.exists(feature_pickle) and os.path.exists(label_pickle):
+            return cPickle.load(open(feature_pickle)), cPickle.load(open(label_pickle))
 
         with self._db.connector() as cur:
-            cur.execute("""SELECT tcr.season, ts1.seed AS wseed, tcr.wteam, ts2.seed AS lseed, tcr.lteam
-                    FROM  tourney_compact_results tcr
-                    JOIN tourney_seeds ts1 ON tcr.wteam = ts1.team AND tcr.season = ts1.season
-                    JOIN tourney_seeds ts2 ON tcr.lteam = ts2.team AND tcr.season = ts2.season
-                    WHERE tcr.season = ?""", (self.season,))
+            cur.execute("""SELECT daynum, wteam, lteam
+                    FROM  regular_season_compact_results
+                    WHERE season = ?""", (season,))
 
             features = []
             labels = []
-            print(self.season)
+            print(season)
             for j, row in enumerate(cur):
                 print(j)
-
                 team_ids = row['wteam'], row['lteam']
-                seeds = list(map(int_seed, [row['wseed'], row['lseed']]))
-                pageranks = list(map(self.league.strength, team_ids))
-                team_deltas = [self.league.team_deltas(team_id) for team_id in team_ids]
-
+                line = [self.pointspreads.pred_game(season, row['wteam'], row['lteam'], row['daynum'])]
                 team_objs = [self.league.data(team_id) for team_id in team_ids]
 
                 # Model should be symmetric, so add features for team A vs team B and team B vs team A
-                team_features = Features(row['season'], team_objs[0], team_objs[1]).features()
-                features.append(team_features + seeds + pageranks + team_deltas[0] + team_deltas[1])
-                labels.append(1)
+                team_features = Features(season, team_objs[0], team_objs[1], row['daynum']).features()
+                if team_features:  # Features returns false-y value if there isn't enough data
+                    features.append(team_features + line)
+                    labels.append(1)
 
-                team_features = Features(row['season'], team_objs[1], team_objs[0]).features()
-                features.append(team_features + seeds[-1::-1] + pageranks[-1::-1] + team_deltas[1] + team_deltas[0])
-                labels.append(0)
+                    team_features = Features(season, team_objs[1], team_objs[0], row['daynum']).features()
+                    features.append(team_features + [-j for j in line])
+                    labels.append(0)
 
-                cPickle.dump(features, open(self.feature_pickle, 'w'))
-                cPickle.dump(labels, open(self.label_pickle, 'w'))
+            cPickle.dump(features, open(feature_pickle, 'w'))
+            cPickle.dump(labels, open(label_pickle, 'w'))
         return features, labels
 
-    def clean(self):
-        os.remove(self.feature_pickle)
-        os.remove(self.label_pickle)
+    @staticmethod
+    def clean():
+        map(os.remove, glob.glob(os.path.join(PICKLE_DIR, "*")))
 
 
 def log_loss(y, y_hat):
@@ -96,8 +109,9 @@ def log_loss(y, y_hat):
 
 def features_labels(before_season):
     features, labels = [], []
-    for season in range(2003, before_season):
-        season_features, season_labels = SeasonFeatures(season).features_and_labels()
+    all_features = AllFeatures()
+    for season in range(2007, before_season):
+        season_features, season_labels = all_features.features_and_labels(season)
         features += season_features
         labels += season_labels
     return numpy.array(features), numpy.array(labels)
@@ -105,61 +119,68 @@ def features_labels(before_season):
 
 def find_best_model(season):
     raw_train_x, train_y = features_labels(season)
-    raw_test_x, test_y = map(numpy.array, SeasonFeatures(season).features_and_labels())
+    raw_test_x, test_y = map(numpy.array, AllFeatures().features_and_labels(season))
+    normalizer = Normalizer()
+    train_x = normalizer.fit_transform(raw_train_x)
+    test_x = normalizer.transform(raw_test_x)
+
     results = {}
     max_right = (0, 1)
+    least_loss = 1
+    use_pca = True
 
-    for use_pca in (True, False):
-        if use_pca:
-            pca = PCA(n_components=12)
-            train_x = pca.fit_transform(raw_train_x)
-            test_x = pca.transform(raw_test_x)
-        else:
-            train_x = raw_train_x
-            test_x = raw_test_x
+    # for use_pca in (True, False):
+    # if use_pca:
+    # pca = PCA(n_components=12)
+    # train_x = pca.fit_transform(raw_train_x)
+    # test_x = pca.transform(raw_test_x)
+    # else:
+    #         train_x = raw_train_x
+    #         test_x = raw_test_x
+    #
+    # for loss_func in ("log", "modified_huber"):
+    #     for penalty in ("l1", "l2"):
+    #         for alpha in [10 ** (0.5 * j) for j in range(-8, 0)]:
+    #             model = SGDClassifier(loss=loss_func, penalty=penalty, alpha=alpha, n_iter=1000).fit(train_x,
+    #                                                                                                  train_y)
+    #             key = ("sgd", use_pca, loss_func, penalty, 2 * numpy.log10(alpha))
+    #             max_right, least_loss = evaluate(model, key, test_x, test_y, results, max_right, least_loss)
 
-        for loss_func in ("log", "modified_huber"):
-            for penalty in ("l1", "l2"):
-                for alpha in [10 ** (0.5 * j) for j in range(-4, 10)]:
-                    model = SGDClassifier(loss=loss_func, penalty=penalty, alpha=alpha, n_iter=1000).fit(train_x, train_y)
-                    predictions = model.predict_proba(test_x)[:, 1]
-                    loss = log_loss(test_y, predictions)
-                    results[("sgd", use_pca, loss_func, penalty, 2 * numpy.log10(alpha))] = loss
+    # test logistic regressions
+    for penalty in ("l1", "l2"):
+        for c in [10 ** (0.5 * j) for j in range(4, 16)]:
+            model = LogisticRegression(penalty=penalty, C=c).fit(train_x, train_y)
+            key = (penalty, use_pca, 2 * numpy.log10(c))
+            max_right, least_loss = evaluate(model, key, test_x, test_y, results, max_right, least_loss)
 
-                    num_right = (test_y == predictions.round()).sum()
-                    pct_right = num_right / float(len(test_y))
-                    if pct_right > float(max_right[0]) / max_right[1]:
-                        max_right = (num_right, len(test_y))
+    model = BaggingClassifier(LogisticRegression(penalty=penalty, C=c), n_estimators=100,
+                              max_samples=0.5).fit(train_x, train_y)
+    key = (penalty + " bagging", use_pca, 2 * numpy.log10(c))
+    max_right, least_loss = evaluate(model, key, test_x, test_y, results, max_right, least_loss)
 
-        # test logistic regressions
-        for penalty in ("l1", "l2"):
-            for c in [10 ** (0.5 * j) for j in range(-15, 0)]:
-                model = LogisticRegression(penalty=penalty, C=c).fit(train_x, train_y)
-                predictions = model.predict_proba(test_x)[:, 1]
-
-                num_right = (test_y == predictions.round()).sum()
-                pct_right = num_right / float(len(test_y))
-                if pct_right > float(max_right[0]) / max_right[1]:
-                    max_right = (num_right, len(test_y))
-
-                results[(penalty, use_pca, 2 * numpy.log10(c))] = log_loss(test_y, predictions)
-
-                model = BaggingClassifier(LogisticRegression(penalty=penalty, C=c), n_estimators=100, max_samples=0.5).fit(train_x, train_y)
-                predictions = model.predict_proba(test_x)[:, 1]
-
-                num_right = (test_y == predictions.round()).sum()
-                pct_right = num_right / float(len(test_y))
-                if pct_right > float(max_right[0]) / max_right[1]:
-                    max_right = (num_right, len(test_y))
-
-                results[(penalty + " bagging", use_pca, 2 * numpy.log10(c))] = log_loss(test_y, predictions)
     print("{:d} out of {:d}".format(*map(int, max_right)))
     return results
 
 
+def evaluate(model, key, test_x, test_y, results, max_right, least_loss):
+    predictions = model.predict_proba(test_x)[:, 1]
+
+    num_right = (test_y == predictions.round()).sum()
+    pct_right = num_right / float(len(test_y))
+    if num_right >= max_right[0]:
+        max_right = (num_right, len(test_y))
+
+    results[key] = log_loss(test_y, predictions)
+    if results[key] < least_loss:
+        least_loss = results[key]
+    print("{:s}\n\t{:.1f}% right ({:,d} out of {:,d})\n\t{:.5f}".format(
+        str(key), 100 * pct_right, num_right, len(test_y), results[key]))
+    return max_right, least_loss
+
+
 def main():
     results = defaultdict(list)
-    test_years = range(2005, 2015)
+    test_years = range(2010, 2015)
     for year in test_years:
         print(year)
         year_results = find_best_model(year)
@@ -190,6 +211,29 @@ def print_model(model):
         numpy.min(model[1]),
         numpy.max(model[1]),
     )
+
+
+def reset():
+    AllFeatures.clean()
+    AllFeatures().build_features()
+
+
+def scratch():
+    season = 2005
+    raw_train_x, train_y = features_labels(season)
+    raw_test_x, test_y = map(numpy.array, AllFeatures().features_and_labels(season))
+    normalizer = Normalizer()
+    poly = PolynomialFeatures(degree=2, interaction_only=True)
+    train_x = normalizer.fit_transform(poly.fit_transform(raw_train_x))
+    test_x = normalizer.transform(poly.transform(raw_test_x))
+    penalty = 'l2'
+    c = 10 ** 4
+    model = LogisticRegression(penalty=penalty, C=c).fit(train_x, train_y)
+    key = (penalty, 2 * numpy.log10(c))
+    predictions = model.predict_proba(test_x)
+    print(model.coef_)
+    print(predictions)
+    max_right = evaluate(model, key, test_x, test_y, {}, (0, 1))
 
 
 if __name__ == '__main__':

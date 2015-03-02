@@ -23,6 +23,7 @@ def get_season_data(year):
 def get_all_seasons():
     data = []
     for year in range(START_YEAR, END_YEAR):
+        print("Querying {:d}".format(year))
         year_data = get_season_data(year).splitlines()
         if data:
             year_data = year_data[1:]

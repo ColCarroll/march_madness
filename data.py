@@ -79,7 +79,7 @@ class DataHandler:
             buff.write(pointspread_data)
 
     def build(self):
-        self.get_pointspreads()
+        #self.get_pointspreads()
         for csv_name in self.list_files():
             self.build_table(csv_name)
 

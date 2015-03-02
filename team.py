@@ -1,139 +1,118 @@
+"""
+The polls that have the most data, in order
+"SAG"	"12"	"6114.0"
+"MOR"	"12"	"6031.5"
+"POM"	"12"	"5823.91666666667"
+"WLK"	"12"	"4862.16666666667"
+"BOB"	"12"	"4700.25"
+"DOL"	"12"	"4594.16666666667"
+"COL"	"12"	"4252.08333333333"
+"RPI"	"12"	"4039.0"
+"WOL"	"12"	"3966.58333333333"
+"RTH"	"12"	"3922.0"
+"USA"	"12"	"454.666666666667"
+"AP"	"12"	"454.416666666667"
+"""
+
+POLLS = ('SAG', 'MOR', 'POM', 'WLK', 'BOB', 'DOL', 'COL', 'RPI', 'WOL', 'RTH', 'USA', 'AP')
+
+STATS = (
+    'fga',
+    'fgm',
+    'fta',
+    'ftm',
+    'fga3',
+    'fgm3',
+    'stl',
+    'ast',
+    'dr',
+    'or',
+    'blk',
+    'pf',
+    'to'
+)
+
 import numpy
-from collections import namedtuple
 from data import DataHandler
 
-POLLS = [  # these appear to be the most consistent
-           "MOR",
-           "POM",
-           "SAG",
-]
+
+class AggregatorCollector:
+    def __init__(self, aggregators):
+        self.aggregators = {}
+        for aggregator in aggregators:
+            self.aggregators[aggregator.label] = aggregator
+
+    def __getitem__(self, item):
+        return self.aggregators[item]
+
+    def update(self, game, team_obj):
+        prefix = 'w' if game['wteam'] == team_obj.id else 'l'
+        for aggregator in self.aggregators.itervalues():
+            aggregator.update(game, team_obj, prefix)
 
 
-class BaseFeature:
-    def __init__(self, label, val):
+class Aggregator:
+    def __init__(self, label, func):
         self.label = label
-        self.val = val
+        self._func = func
+        self.season = None
+        self.val = []
 
-    def __repr__(self):
-        return str(self.label)
+    def reset(self):
+        self.val = []
 
-    def __str__(self):
-        return "{:s}:\t{:s}".format(*map(str, [self.label, self.val]))
-
-
-class QueryFeature:
-    def __init__(self, label, db, query, *args):
-        self._db = db
-        self._val = None
-        self.label = label
-        self.query = query
-        self.args = args
+    def update(self, game, team_obj, prefix):
+        if game['season'] != self.season:
+            self.season = game['season']
+            self.reset()
+        self.val.append(self._func(game, team_obj, prefix, self.val))
 
     @property
-    def val(self):
-        if self._val is None:
-            with self._db.connector(commit=False) as cur:
-                cur.execute(self.query, self.args)
-                try:
-                    self._val = next(cur)[0]
-                except StopIteration:
-                    raise ValueError("No results returned!")
-        return self._val
-
-    def __repr__(self):
-        return str(self.label)
-
-    def __str__(self):
-        return "{:s}:\t{:s}".format(str(self.label), str(self.val))
+    def value(self):
+        return numpy.median(self.val[:-1])
 
 
-class MedianFeature:
-    def __init__(self, label, data, metric, team_id):
-        self.data = data
-        self.label = label
-        self.id = team_id
-        self.win_metric = "w" + metric
-        self.lose_metric = "l" + metric
-        self._for = None
-        self._against = None
+def wins(game, team, prefix, val):
+    return val + int(prefix == 'w')
 
-    def _execute(self):
-        self._for = numpy.median(
-            [j[self.win_metric] if j['wteam'] == self.id else j[self.lose_metric] for j in self.data]
-        )
-        self._against = numpy.median(
-            [j[self.lose_metric] if j['wteam'] == self.id else j[self.win_metric] for j in self.data]
-        )
 
-    @property
-    def for_(self):
-        if self._for is None:
-            self._execute()
-        return self._for
+def losses(game, team, prefix, val):
+    return val + int(prefix == 'l')
 
-    @property
-    def against(self):
-        if self._against is None:
-            self._execute()
-        return self._against
 
-    def __repr__(self):
-        return str(self.label)
-
-    def __str__(self):
-        return "{:s} for:\t{:s}\n{:s} against:\t{:s}".format(
-            *map(str, [self.label, self.for_, self.label, self.against]))
+def stat_agg(stat):
+    def agg(game, team, prefix, val):
+        return game["{:s}{:s}".format(prefix, stat)]
+    return agg
 
 
 class Team:
-    pseudo_feature = namedtuple("pseudo_feature", ["for_", "against"])
-
-    def __init__(self, team_id, season):
+    def __init__(self, team_id):
         self.id = team_id
-        self.season = season
-        self._data = None
         self._db = DataHandler()
-        self.fgm = MedianFeature("Field goals made", self.data, 'fgm', self.id)
-        self.fga = MedianFeature("Field goals attempted", self.data, 'fga', self.id)
-        self.fgm3 = MedianFeature("3 point field goals made", self.data, 'fgm3', self.id)
-        self.fga3 = MedianFeature("3 point field goals attempted", self.data, 'fga3', self.id)
-        self.ftm = MedianFeature("Free throws made", self.data, 'ftm', self.id)
-        self.fta = MedianFeature("Free throws attempted", self.data, 'fta', self.id)
+        self._data = None
+        self._ranks = None
+        self._name = None
+        self._features = None
+        self.aggregator = AggregatorCollector([Aggregator(stat, stat_agg(stat)) for stat in STATS])
 
-        self.all_features = [QueryFeature("Name", self._db, "SELECT team_name FROM teams WHERE team_id=?", self.id),
-                             QueryFeature("Wins", self._db, """
-                SELECT
-                    COUNT(*)
-                FROM
-                    regular_season_compact_results
-                WHERE
-                    season = ?
-                AND
-                    wteam = ?""", self.season, self.id),
-                             QueryFeature("Losses", self._db, """
-                SELECT
-                    COUNT(*)
-                FROM
-                    regular_season_compact_results
-                WHERE
-                    season = ?
-                AND
-                    lteam = ?""", self.season, self.id),
-                             MedianFeature("Score", self.data, 'score', self.id),
-                             self.fgm,
-                             self.fga,
-                             self.fgm3,
-                             self.fga3,
-                             self.ftm,
-                             self.fta,
-                             MedianFeature("Offensive rebounds", self.data, 'or', self.id),
-                             MedianFeature("Defensive rebounds", self.data, 'dr', self.id),
-                             MedianFeature("Assists", self.data, 'ast', self.id),
-                             MedianFeature("Turnovers", self.data, 'to', self.id),
-                             MedianFeature("Steals", self.data, 'stl', self.id),
-                             MedianFeature("Blocks", self.data, 'blk', self.id),
-                             MedianFeature("Personal fouls", self.data, 'pf', self.id)] + \
-                            self._ratios() + self._polls()
+    @property
+    def ranks(self):
+        if self._ranks is None:
+            with self._db.connector() as cur:
+                cur.execute("""
+                    SELECT
+                        orank, season, rating_day_num, sys_name
+                    FROM
+                        massey_ordinals
+                    WHERE
+                        team = ?
+                    AND
+                        sys_name IN ({:s})
+                    ORDER BY
+                        season, rating_day_num""".format(",".join("'{:s}'".format(poll) for poll in POLLS)), (self.id,))
+                self._ranks = list(cur)
+        return self._ranks
 
     @property
     def data(self):
@@ -145,61 +124,64 @@ class Team:
                     FROM
                         regular_season_detailed_results
                     WHERE
-                        season = ?
-                    AND
-                        (wteam = ? OR lteam = ?)""", (self.season, self.id, self.id)
-                )
-                self._data = [row for row in cur]
+                        (wteam = ? OR lteam = ?)
+                    ORDER BY
+                        season, daynum""", (self.id, self.id))
+                self._data = list(cur)
         return self._data
 
-    def _ratios(self):
-        return [
-            BaseFeature("Field goal pct for", self.fgm.for_ / float(self.fga.for_)),
-            BaseFeature("Field goal pct against", self.fgm.against / float(self.fga.against)),
-            BaseFeature("3 pt field goal pct for", self.fgm3.for_ / float(self.fga3.for_)),
-            BaseFeature("3 pt field goal pct against", self.fgm3.against / float(self.fga3.against)),
-            BaseFeature("Free throw pct for", self.ftm.for_ / float(self.fta.for_)),
-            BaseFeature("Free throw pct against", self.ftm.against / float(self.fta.against)),
-        ]
+    def is_after_first_n_games(self, game, n):
+        return sum(1 for j in self.data if j['season'] == game['season'] and j['daynum'] < game['daynum']) > n
 
-    def _polls(self):
-        polls = []
-        for poll in POLLS:
+    def get_rank_during_game(self, game):
+        ranks = {j: 0 for j in POLLS}
+        for row in self.ranks:
+            if row['season'] == game['season']:
+                if row['rating_day_num'] < game['daynum']:
+                    ranks[row['sys_name']] = row['orank']
+        ranks = numpy.array(ranks.values())
+        ranks = ranks[ranks > 0]
+        if len(ranks) == 0:
+            return numpy.log(351)  # highest possible rank
+        return numpy.log(numpy.median(ranks))
+
+    def _get_wins(self, game):
+        return sum(int(row['wteam'] == self.id) for row in self.data if
+                   row['season'] == game['season'] and row['daynum'] < game['daynum'])
+
+    @property
+    def name(self):
+        if self._name is None:
             with self._db.connector() as cur:
-                cur.execute("""SELECT rating_day_num, orank
-                               FROM massey_ordinals
-                               WHERE season=? AND team=? AND sys_name=?;""", (self.season, self.id, poll))
-                data = list(cur)
-                if data:
-                    first_rank = min(data, key=lambda j: j['rating_day_num'])['orank']
-                    last_rank = max(data, key=lambda j: j['rating_day_num'])['orank']
-                    rank_ratio = float(first_rank) / float(last_rank)
-                else:
-                    first_rank, last_rank, rank_ratio = 0, 0, 0
-                polls.extend([
-                    BaseFeature("{:s} poll start".format(poll), first_rank),
-                    BaseFeature("{:s} poll end".format(poll), last_rank),
-                    BaseFeature("{:s} poll ratio".format(poll), rank_ratio)
-                ])
-        return polls
+                cur.execute("""SELECT team_name FROM teams WHERE team_id = ?""", (self.id,))
+                self._name = list(cur)[0][0]
+        return self._name
 
+    @property
     def features(self):
-        features = []
-        for ftr in self.all_features[1:]:
-            if isinstance(ftr, MedianFeature):
-                features.append(ftr.for_)
-                features.append(ftr.against)
-            elif isinstance(ftr, QueryFeature) or isinstance(ftr, BaseFeature):
-                features.append(ftr.val)
-        return features
+        if self._features is None:
+            self._features = {}
+            for game in self.data:
+                self.aggregator.update(game, self)
+                if self.is_after_first_n_games(game, 5):
+                    key = (game['season'], game['daynum'])
+                    self._features[key] = [
+                        self.get_rank_during_game(game),
+                        self._get_wins(game),
+                    ] + [agg.value for agg in self.aggregator.aggregators.values()]
+        return self._features
 
     def __repr__(self):
-        return "{:d} {:d}".format(self.season, self.id)
+        return "Team {:d}".format(self.id)
 
     def __str__(self):
-        return "\n".join(str(feature) for feature in self.all_features)
+        return self.name
 
 
 if __name__ == '__main__':
-    team = Team(1314, 2005)
+    team = Team(1314)
     print(str(team))
+    for k, v in sorted(team.features.items()):
+        print(k, v)
+    for key, value in team.aggregator.aggregators.iteritems():
+        print(key, value.value)
