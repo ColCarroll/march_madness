@@ -83,6 +83,13 @@ def losses(game, team, prefix, val):
 def stat_agg(stat):
     def agg(game, team, prefix, val):
         return game["{:s}{:s}".format(prefix, stat)]
+
+    return agg
+
+
+def pct_agg(num_stat, denom_stat):
+    def agg(game, team, prefix, val):
+        return float(game["{:s}{:s}".format(prefix, num_stat)]) / max(1.0, float(game["{:s}{:s}".format(prefix, denom_stat)]))
     return agg
 
 
@@ -94,7 +101,10 @@ class Team:
         self._ranks = None
         self._name = None
         self._features = None
-        self.aggregator = AggregatorCollector([Aggregator(stat, stat_agg(stat)) for stat in STATS])
+        self.aggregator = AggregatorCollector([Aggregator(stat, stat_agg(stat)) for stat in STATS] +
+                                              [Aggregator('fgpct', pct_agg('fga', 'fgm')),
+                                               Aggregator('fgpct3', pct_agg('fga3', 'fgm3')),
+                                               Aggregator('ftpct', pct_agg('fta', 'ftm'))])
 
     @property
     def ranks(self):
@@ -164,11 +174,14 @@ class Team:
             for game in self.data:
                 self.aggregator.update(game, self)
                 if self.is_after_first_n_games(game, 5):
+                    aggs = self.aggregator.aggregators
                     key = (game['season'], game['daynum'])
                     self._features[key] = [
-                        self.get_rank_during_game(game),
-                        self._get_wins(game),
-                    ] + [agg.value for agg in self.aggregator.aggregators.values()]
+                                              self.get_rank_during_game(game),
+                                              self._get_wins(game),
+                                          ] + [agg.value for agg in aggs.values()] + [
+
+                                          ]
         return self._features
 
     def __repr__(self):

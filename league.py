@@ -4,6 +4,7 @@ from sklearn.linear_model import LassoLarsCV
 from data import DataHandler
 from team import Team
 
+FIRST_SEASON = 2007
 
 def extract_metric(row, team_id, metric):
     return row['w' + metric] if row['wteam'] == team_id else row['l' + metric]
@@ -26,7 +27,6 @@ class PointSpreads:
         self._data = None
         self._db = DataHandler()
         self._seasons = {}
-        self._proba_seasons = {}
 
     @property
     def data(self):
@@ -37,33 +37,16 @@ class PointSpreads:
         return self._data
 
     def pred_game(self, season, team_one, team_two, daynum=None):
+        if season < FIRST_SEASON:
+            return 0
         model = self.pred_season(season)
         for row in [j for j in self.data if j["season"] == season]:
-            if row['daynum'] == daynum:
+            if row['daynum'] == daynum or daynum is None:
                 if row['wteam'] == team_one and row['lteam'] == team_two:
                     return model.predict(self.get_feature(row))
                 if row['wteam'] == team_two and row['lteam'] == team_one:
                     return model.predict([-j for j in self.get_feature(row)])
         return 0
-
-    def pred_proba(self, season, team_one, team_two, daynum=None):
-        pass
-
-    def pred_proba_season(self, season):
-        if season not in self._proba_seasons:
-            features = []
-            labels = []
-            for row in [j for j in self.data if 2006 < j["season"] < season]:
-                model = self.pred_season(j['season'])
-                feature = model.predict(self.get_feature(row))
-
-                features.append(feature)
-                labels.append(1)
-
-                features.append([-j for j in feature])
-                labels.append(0)
-            self._proba_seasons[season] = LassoLarsCV(fit_intercept=False).fit(features, labels)
-        return self._proba_seasons[season]
 
     def get_feature(self, row):
         feature = []
@@ -159,7 +142,7 @@ class League:
 
 def main():
     spreads = PointSpreads()
-    for season in range(2007, 2015):
+    for season in range(FIRST_SEASON, 2015):
         print(season)
         spreads.pred_season(season)
 
