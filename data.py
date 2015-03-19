@@ -1,14 +1,15 @@
 import csv
+import json
 import os
 import glob
 from contextlib import contextmanager
 import sqlite3
 from collections import namedtuple
-import datetime
-from pointspreads import get_all_seasons
+import re
 
 DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(DIR, 'data')
+JSON_DIR = os.path.join(DIR, 'model_json')
 
 
 class DataHandler:
@@ -63,23 +64,7 @@ class DataHandler:
         with self.connector(commit=True) as cur:
             cur.execute(query)
 
-    def get_pointspreads(self):
-        fname = os.path.join(DATA_DIR, "pointspreads.csv")
-        if self.table_exists('pointspreads'):
-            with self.connector() as cur:
-                cur.execute("SELECT MAX(date) FROM pointspreads;")
-                max_date = datetime.datetime.strptime(cur.fetchone()[0], "%m/%d/%Y").date()
-            if (datetime.date.today() - max_date).days > 4:
-                with self.connector(commit=True) as cur:
-                    cur.execute("DROP TABLE pointspreads;")
-            else:
-                return
-        pointspread_data = get_all_seasons()
-        with open(fname, 'w') as buff:
-            buff.write(pointspread_data)
-
     def build(self):
-        #self.get_pointspreads()
         for csv_name in self.list_files():
             self.build_table(csv_name)
 
@@ -113,10 +98,129 @@ class DataHandler:
         return glob.glob(os.path.join(self.data_dir, "*.csv"))
 
 
+class NameMap:
+    fname = os.path.join(DATA_DIR, "team_spellings.csv")
+
+    def __init__(self):
+        self._data = None
+
+    @property
+    def data(self):
+        if self._data is None:
+            with open(self.fname) as buff:
+                self._data = {row["name_spelling"].lower(): int(row["team_id"]) for row in csv.DictReader(buff)}
+        return self._data
+
+    def lookup(self, team_name):
+        try:
+            return self.data[team_name.lower()]
+        except KeyError:
+            print(team_name)
+
+
+class TourneyTeam:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self._round_probs = None
+
+    def round_probs(self):
+        if self._round_probs is None:
+            self._round_probs = [0 for _ in range(7)]
+            for key, value in self.kwargs.iteritems():
+                match = re.match(r"rd(\d)_win", key)
+                if match:
+                    round = int(match.group(1))
+                    self._round_probs[round - 1] = float(value)
+        return self._round_probs
+
+    def __repr__(self):
+        return self.kwargs["team_name"]
+
+
+def id_to_name():
+    with DataHandler().connector() as cur:
+        cur.execute("SELECT * FROM teams")
+        data = {row["team_id"]: row["team_name"] for row in cur}
+    return data
+
+
+def team_seeds():
+    with DataHandler().connector() as cur:
+        cur.execute("SELECT * FROM tourney_seeds WHERE season=2015")
+        data = {row["team"]: int(row["seed"][1:3]) for row in cur}
+    return data
+
+def human_readable():
+    names = id_to_name()
+    seeds = team_seeds()
+    data = []
+    with open(os.path.join(DIR, 'out_data/predictions/2015_ensemble.csv')) as buff:
+        reader = csv.DictReader(buff)
+        for row in reader:
+            _, team_one, team_two = map(int, row["id"].split("_"))
+            pred = 100 * float(row["pred"])
+            team_one = "({:d}) {:s}".format(seeds[team_one], names[team_one])
+            team_two = "({:d}) {:s}".format(seeds[team_two], names[team_two])
+            data.append({"team_one": team_one, "team_two": team_two, "prediction": pred})
+    json.dump({"seeds": data}, open(os.path.join(DATA_DIR, "preds.json"), 'w'))
+
+
+
+def check_first_round():
+    names = NameMap()
+    fname = os.path.join(DATA_DIR, 'preds.tsv')
+    teams = {}
+    with open(fname) as buff:
+        for row in csv.DictReader(buff, delimiter="\t"):
+            team_id = names.lookup(row["team_name"])
+            win_pct = float(row["rd2_win"])
+            region = row["team_region"]
+            try:
+                seed = int(row["team_seed"])
+            except ValueError:
+                seed = int(row["team_seed"][:2])
+            if region not in teams:
+                teams[region] = {}
+            teams[region][seed] = {"team_id": team_id, "win_pct": win_pct}
+    first_round_matchups = {}
+
+    for region, region_data in teams.iteritems():
+        for seed, seed_data in region_data.iteritems():
+            opponent = teams[region][17 - seed]
+            if opponent["team_id"] < seed_data["team_id"]:
+                key = "2015_{:d}_{:d}".format(opponent["team_id"], seed_data["team_id"])
+                first_round_matchups[key] = opponent["win_pct"]
+            else:
+                key = "2015_{:d}_{:d}".format(seed_data["team_id"], opponent["team_id"])
+                first_round_matchups[key] = seed_data["win_pct"]
+
+    team_lookup = id_to_name()
+    data = []
+    with open(os.path.join(DIR, 'out_data/predictions/2015.csv')) as buff:
+        with open(os.path.join(DIR, 'out_data/predictions/2015_ensemble.csv'), 'w') as write_buff:
+            write_buff.write("id,pred\n")
+            reader = csv.DictReader(buff)
+            for row in reader:
+                # if "1246" in row["id"]:
+                #     _, team_one, team_two = map(int, row["id"].split("_"))
+                #     if team_one == 1246:
+                #         write_buff.write("{:s},{:f}\n".format(row["id"], 0.9999))
+                #     else:
+                #         write_buff.write("{:s},{:f}\n".format(row["id"], 1 - 0.9999))
+                if row["id"] in first_round_matchups:
+                    _, team_one, team_two = map(int, row["id"].split("_"))
+                    data.append([team_lookup[team_one], team_lookup[team_two], 100 * first_round_matchups[row["id"]],
+                                 100 * float(row["pred"])])
+                    write_buff.write("{:s},{:f}\n".format(row["id"], 0.5 * (float(row["pred"]) + first_round_matchups[row["id"]])))
+                else:
+                    write_buff.write("{:s},{:f}\n".format(row["id"], float(row["pred"])))
+
+
+
 def main():
     data = DataHandler()
     data.build()
 
 
 if __name__ == '__main__':
-    main()
+    human_readable()

@@ -80,16 +80,22 @@ def losses(game, team, prefix, val):
     return val + int(prefix == 'l')
 
 
-def stat_agg(stat):
+def stat_agg(stat, against=False):
     def agg(game, team, prefix, val):
+        if against:
+            prefix = "w" if prefix == "l" else "l"
         return game["{:s}{:s}".format(prefix, stat)]
 
     return agg
 
 
-def pct_agg(num_stat, denom_stat):
+def pct_agg(num_stat, denom_stat, against=False):
     def agg(game, team, prefix, val):
-        return float(game["{:s}{:s}".format(prefix, num_stat)]) / max(1.0, float(game["{:s}{:s}".format(prefix, denom_stat)]))
+        if against:
+            prefix = "w" if prefix == "l" else "l"
+        return float(game["{:s}{:s}".format(prefix, num_stat)]) / max(1.0, float(
+            game["{:s}{:s}".format(prefix, denom_stat)]))
+
     return agg
 
 
@@ -101,10 +107,15 @@ class Team:
         self._ranks = None
         self._name = None
         self._features = None
-        self.aggregator = AggregatorCollector([Aggregator(stat, stat_agg(stat)) for stat in STATS] +
+        self._start_rank = {}
+        self.aggregator = AggregatorCollector([Aggregator(stat, stat_agg(stat, False)) for stat in STATS] +\
                                               [Aggregator('fgpct', pct_agg('fga', 'fgm')),
-                                               Aggregator('fgpct3', pct_agg('fga3', 'fgm3')),
-                                               Aggregator('ftpct', pct_agg('fta', 'ftm'))])
+                                                  Aggregator('fgpct3', pct_agg('fga3', 'fgm3')),
+                                                  Aggregator('ftpct', pct_agg('fta', 'ftm')),
+                                                  Aggregator('fgpct', pct_agg('fga', 'fgm', True)),
+                                                  Aggregator('fgpct3', pct_agg('fga3', 'fgm3', True)),
+                                                  Aggregator('ftpct', pct_agg('fta', 'ftm', True))] +
+                                              [Aggregator('wpct', lambda g, t, p, tv: int(p == 'w'))])
 
     @property
     def ranks(self):
@@ -144,7 +155,7 @@ class Team:
         return sum(1 for j in self.data if j['season'] == game['season'] and j['daynum'] < game['daynum']) > n
 
     def get_rank_during_game(self, game):
-        ranks = {j: 0 for j in POLLS}
+        ranks = {}
         for row in self.ranks:
             if row['season'] == game['season']:
                 if row['rating_day_num'] < game['daynum']:
@@ -154,6 +165,21 @@ class Team:
         if len(ranks) == 0:
             return numpy.log(351)  # highest possible rank
         return numpy.log(numpy.median(ranks))
+
+    def start_rank(self, season):
+        if season not in self._start_rank:
+            ranks = {}
+            for row in self.ranks:
+                if row['season'] == season:
+                    if row['sys_name'] not in ranks:
+                        ranks[row['sys_name']] = row['orank']
+            ranks = numpy.array(ranks.values())
+            ranks = ranks[ranks > 0]
+            if len(ranks) == 0:
+                self._start_rank[season] = numpy.log(351)
+            else:
+                self._start_rank[season] = numpy.log(numpy.median(ranks))
+        return self._start_rank[season]
 
     def _get_wins(self, game):
         return sum(int(row['wteam'] == self.id) for row in self.data if
@@ -176,12 +202,12 @@ class Team:
                 if self.is_after_first_n_games(game, 5):
                     aggs = self.aggregator.aggregators
                     key = (game['season'], game['daynum'])
-                    self._features[key] = [
-                                              self.get_rank_during_game(game),
-                                              self._get_wins(game),
-                                          ] + [agg.value for agg in aggs.values()] + [
+                    start_rank = self.start_rank(game['season'])
+                    game_rank = self.get_rank_during_game(game)
+                    rank_ratio = numpy.log1p(numpy.exp(game_rank)) / numpy.log1p(numpy.exp(start_rank))
+                    self._features[key] = [start_rank, game_rank, rank_ratio, self._get_wins(game)] +\
+                                          [agg.value for agg in aggs.values()]
 
-                                          ]
         return self._features
 
     def __repr__(self):
